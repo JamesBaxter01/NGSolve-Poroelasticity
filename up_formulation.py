@@ -60,6 +60,28 @@ def LameParameter(G, nu):
 
 
 def ConfinedCompression(G, nu, viscosity, alpha, phi, k, chi, rho, g, dt, dt_max, dt_growth, R, H, u_max , compression_time, t_end, nx, ny, grading, order, tol, Confined=True, DrawResults=False):
+    
+    def div_ax(u):
+        return (grad(u)[0,0] + u[0]/r + grad(u)[1,1])
+
+    def eps_ax(u):
+        gu = grad(u)
+        return CF((gu[0,0], gu[1,1], u[0]/r, gu[0,1] + gu[1,0]))
+        
+        
+    def Stress_ax_Anisotropic(u_vec):
+        e_ax = eps_ax(u_vec)
+        sigma_v = Cauchy_tensor_star * e_ax
+        return CF( (sigma_v[0], sigma_v[3], 0,
+                        sigma_v[3], sigma_v[1], 0,
+                        0,          0,          sigma_v[2]), dims=(3,3) )
+        
+    def AxialGrad(v):
+        gv = Grad(v)
+        return CF((gv[0,0], gv[0,1], 0,
+                    gv[1,0], gv[1,1], 0,
+                    0,       0,       v[0]/r), dims=(3,3))
+        
     start_time = time.time()
     L = H
     growth_factor = dt_growth
@@ -78,31 +100,8 @@ def ConfinedCompression(G, nu, viscosity, alpha, phi, k, chi, rho, g, dt, dt_max
                      C41, C42, C43, C44)
     
     Cauchy_tensor_star = CoefficientFunction(cauchy_values, dims=(4, 4)).Compile()
-
-    def div_ax(u):
-        return (grad(u)[0,0] + u[0]/r + grad(u)[1,1])
-
-    def eps_ax(u):
-        gu = grad(u)
-        return CF((gu[0,0], gu[1,1], u[0]/r, gu[0,1] + gu[1,0]))
-    
-    
-    def Stress_ax_Anisotropic(u_vec):
-        e_ax = eps_ax(u_vec)
-        sigma_v = Cauchy_tensor_star * e_ax
-        return CF( (sigma_v[0], sigma_v[3], 0,
-                    sigma_v[3], sigma_v[1], 0,
-                    0,          0,          sigma_v[2]), dims=(3,3) )
-    
-    def AxialGrad(v):
-        gv = Grad(v)
-        return CF((gv[0,0], gv[0,1], 0,
-                gv[1,0], gv[1,1], 0,
-                0,       0,       v[0]/r), dims=(3,3))
-
     twopi = 2*np.pi
     k_ref = k
-    
 
     K = BulkModulus(G, nu) 
     S = phi * chi + ((1-alpha)*(alpha-phi)) / K    
@@ -111,10 +110,9 @@ def ConfinedCompression(G, nu, viscosity, alpha, phi, k, chi, rho, g, dt, dt_max
 
     dt_star = dt / tau 
     S_star = S * G
- 
+    
     k11, k12 = k_ref, 0
     k21, k22 = 0, k_ref
-
     k_values = (k11/k_ref, k12/k_ref,
                 k21/k_ref, k22/k_ref)
     
@@ -149,9 +147,8 @@ def ConfinedCompression(G, nu, viscosity, alpha, phi, k, chi, rho, g, dt, dt_max
     b = CoefficientFunction((0, rho*g))
 
     qbar = CoefficientFunction(0) 
-
     r = x
-
+   
     if DrawResults == True:
         from ngsolve.webgui import Draw
         sceneu = Draw(gfu_star, mesh, deformation=True)
@@ -307,5 +304,231 @@ def ConfinedCompression(G, nu, viscosity, alpha, phi, k, chi, rho, g, dt, dt_max
 
     
     return time_vals, F_solid, F_fluid
+
+
+
+def Consolidation(G, nu, viscosity, alpha, n, k, chi, rho, g, dt, dt_max, dt_growth, R, H, traction, t_end, nx, ny, grading, order, tol, Confined=True, DrawResults=False):
+    def div_ax(u):
+        return (grad(u)[0,0] + u[0]/r + grad(u)[1,1])
+
+    def eps_ax(u):
+        gu = grad(u)
+        return CF((gu[0,0], gu[1,1], u[0]/r, gu[0,1] + gu[1,0]))
+        
+        
+    def Stress_ax_Anisotropic(u_vec):
+        e_ax = eps_ax(u_vec)
+        sigma_v = Cauchy_tensor_star * e_ax
+        return CF( (sigma_v[0], sigma_v[3], 0,
+                        sigma_v[3], sigma_v[1], 0,
+                        0,          0,          sigma_v[2]), dims=(3,3) )
+        
+    def AxialGrad(v):
+        gv = Grad(v)
+        return CF((gv[0,0], gv[0,1], 0,
+                    gv[1,0], gv[1,1], 0,
+                    0,       0,       v[0]/r), dims=(3,3))
+
+    L = H
+    growth_factor = dt_growth
+
+    lame_star = LameParameter(G, nu) / G 
+
+    C11, C12, C13, C14 = lame_star + 2, lame_star,     lame_star,     0
+    C21, C22, C23, C24 = lame_star,     lame_star + 2, lame_star,     0
+    C31, C32, C33, C34 = lame_star,     lame_star,     lame_star + 2, 0
+    C41, C42, C43, C44 = 0,             0,             0,             1
+
+    cauchy_values = (C11, C12, C13, C14,
+                     C21, C22, C23, C24,
+                     C31, C32, C33, C34,
+                     C41, C42, C43, C44)
+    
+    Cauchy_tensor_star = CoefficientFunction(cauchy_values, dims=(4, 4)).Compile()
+
+    twopi = 2*np.pi
+    k_ref = k
+    
+    K = BulkModulus(G, nu)
+    S = n * chi + ((1-alpha)*(alpha-n)) / K    
+    
+    tau = L**2 * viscosity / (k * G)
+
+    dt_star = dt / tau
+    S_star = S * G
+ 
+    k11, k12 = k_ref, 0
+    k21, k22 = 0, k_ref
+
+    k_values = (k11/k_ref, k12/k_ref,
+                k21/k_ref, k22/k_ref)
+    
+    k_star = CoefficientFunction(k_values, dims=(2,2)).Compile()
+
+    R_Star = R / H
+    H_Star = 1.0
+    mesh = MakeStructuredMesh(nx, ny, Lx=R_Star, Ly=H_Star, grading=grading)
+
+    if Confined == True:
+        V = VectorH1(mesh, order=order, dirichlet="bottom", dirichletx="sides", dirichletz="sides")
+    if Confined == False:
+        V = VectorH1(mesh, order=order, dirichlet="bottom")
+
+    Q = H1(mesh,order=order-1, dirichlet="top")
+    (u,v) = V.TnT()
+    (p,q) = Q.TnT()
+
+    gfu_star = GridFunction(V)
+    gfp_star = GridFunction(Q)
+    gfp_star.Set(0)
+
+    u_old_star = GridFunction(V)
+    u_old_star.Set((0,0))
+
+    p_old_star = GridFunction(Q)
+    p_old_star.Set(0)
+
+    n = specialcf.normal(mesh.dim)
+
+    tbar = CoefficientFunction((0, traction))
+    b = CoefficientFunction((0, rho*g))
+
+    qbar = CoefficientFunction(0) 
+    r = x
+   
+    if DrawResults == True:
+        from ngsolve.webgui import Draw
+        sceneu = Draw(gfu_star, mesh, deformation=True)
+        scenep = Draw(G * gfp_star, mesh)
+        scene_darcy = Draw(-(k/viscosity) * (G/L) * grad(gfp_star), mesh, name="darcy_flux [m/s]")
+        scene_vel = Draw((L/tau) * (gfu_star - u_old_star) / dt_star, mesh, name="solid_velocity [m/s]")
+
+    a_K = BilinearForm(V)
+    a_K += InnerProduct(Cauchy_tensor_star * eps_ax(u), eps_ax(v)) * twopi * r * dx
+    a_K.Assemble()
+    pre_a_K = a_K.mat.Inverse(freedofs = V.FreeDofs(), inverse="sparsecholesky")
+
+    a_Q = BilinearForm(trialspace=Q, testspace=V)
+    a_Q += p * div_ax(v) * twopi * r * dx
+    a_Q.Assemble()
+
+    a_S = BilinearForm(Q)
+    a_S += p * q * twopi * r * dx
+    a_S.Assemble()
+
+    a_H = BilinearForm(Q)
+    a_H += (k_star * grad(p) * grad(q)) * twopi * r * dx
+    a_H.Assemble()
+    tbar = CF((0, traction))
+    tbar_star = tbar / G
+    b_star = (b * L) / G
+
+    b_f = LinearForm(V)
+    b_f += (v * tbar_star) * twopi * r * ds("top")
+    b_f += (v * b_star) * twopi * r * dx
+    b_f.Assemble()
+
+    qbar_star = (qbar * L) / (G * viscosity) 
+    k_n = InnerProduct(n, k_star * n)
+    b_q = LinearForm(Q)
+
+    b_q += qbar_star * k_n * q * twopi * r * ds("top")
+    b_q.Assemble()
+
+    a_PreP = BilinearForm(Q)
+    a_PreP += (grad(p) * grad(q) + p * q) * twopi * r * dx
+    a_PreP.Assemble()
+    pre_a_P = a_PreP.mat.Inverse(freedofs = Q.FreeDofs(), inverse="sparsecholesky")
+
+    A = BlockMatrix([
+        [a_K.mat,        -alpha * a_Q.mat],
+        [(alpha/dt_star) * a_Q.mat.T,   a_H.mat + S_star/dt_star * a_S.mat]
+        ])
+
+    F = BlockVector([
+        b_f.vec, 
+        (alpha/dt_star) * a_Q.mat.T * u_old_star.vec + 
+                    (S_star/dt_star) * a_S.mat * p_old_star.vec + 
+                    b_q.vec])
+
+    sol = BlockVector([gfu_star.vec, gfp_star.vec])
+
+    rhs_resid = F.CreateVector()
+    correction = F.CreateVector()
+    time_vals_nondim = []
+
+    t = 0
+    t_end_star = t_end / tau
+    dt_star_max = dt_max / tau 
+    all_p_values, displacement_max = [], []
+    
+    while t < t_end_star:
+
+        A = BlockMatrix([
+        [a_K.mat,        -alpha * a_Q.mat],
+        [(alpha/dt_star) * a_Q.mat.T,   a_H.mat + S_star/dt_star * a_S.mat]
+        ])
+
+        F = BlockVector([
+        b_f.vec, 
+        (alpha/dt_star) * a_Q.mat.T * u_old_star.vec + 
+            (S_star/dt_star) * a_S.mat * p_old_star.vec + 
+            b_q.vec])
+
+
+        pre_C = BlockMatrix([
+            [dt_star * pre_a_K, None],
+            [None,   dt_star * pre_a_P]
+        ])
+        
+        sol[0].data = gfu_star.vec
+        sol[1].data = gfp_star.vec
+
+        rhs_resid.data = F - A * sol
+        
+        rhs_resid[0].data[~V.FreeDofs()] = 0.0
+        rhs_resid[1].data[~Q.FreeDofs()] = 0.0
+
+        correction[:] = 0.0
+        GMRes(A=A, b=rhs_resid, pre=pre_C, x=correction, tol=tol, printrates=False, maxsteps=500, restart=150)
+        sol.data += correction
+
+        #print(f"Solid: {solid_force_phys:.6f}, Fluid: {fluid_force_phys:.6f}, Total: {solid_force_phys + fluid_force_phys:.6f}, \
+        #    Time: {t*tau:.4f} s / {t_end:.4f} s, dt: {dt_star * tau:.6f} s")
+        if DrawResults == True: 
+            sceneu.Redraw()
+            scenep.Redraw()
+            scene_darcy.Redraw()
+            scene_vel.Redraw()
+ 
+        u_old_star.vec.data = gfu_star.vec
+        p_old_star.vec.data = gfp_star.vec
+
+        p_values = []
+        heights = np.linspace(0, H, 50) 
+        for y in heights:
+            val = gfp_star(mesh(0,y,0))
+            p_values.append(val)
+
+        p_values = np.array(p_values)*G
+
+        all_p_values.append(p_values)
+
+        total_uy = Integrate(gfu_star.components[1] * twopi * r, mesh, definedon=mesh.Boundaries("top"))
+
+        top_area = Integrate(1 * twopi * r, mesh, definedon=mesh.Boundaries("top"))
+
+        top_settlement = total_uy / top_area
+        displacement_max.append(np.abs(top_settlement))
+        time_vals_nondim.append(t)
+
+        dt_star = min(dt_star * growth_factor, dt_star_max)
+        t += dt_star
+
+    
+    time_vals = np.array(time_vals_nondim)*tau
+    
+    return time_vals, all_p_values, displacement_max
+
 
 
