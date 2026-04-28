@@ -1,0 +1,33 @@
+name: fem
+channels:
+  - conda-forge
+dependencies:
+  # Core Python
+  - python=3.11
+
+  # Scientific stack
+  - numpy
+  - scipy
+  - matplotlib
+
+  # NGSolve stack (version-locked internally)
+
+  # PETSc stack (prebuilt, avoids compilation hell)
+  - petsc
+  - petsc4py
+  - mpi4py
+  - slepc
+  - slepc4py
+
+  # MPI (required by PETSc)
+  - openmpi
+
+  # Optional but useful
+  - jupyter
+  - ipython
+
+  # Pip (only for ngsPETSc)
+  - pip
+  - pip:
+      - ngsolve
+      - ngsPETSc

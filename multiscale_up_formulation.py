@@ -2,6 +2,7 @@ from ngsolve import *
 from netgen.meshing import Mesh as NetMesh, MeshPoint, Element2D, Element1D, FaceDescriptor
 import netgen.meshing as meshing
 
+
 def MakeStructuredMesh(nx, ny, Lx, Ly, grading):
     m = NetMesh()
     m.dim = 2
@@ -47,6 +48,7 @@ import time as time
 import matplotlib.pyplot as plt
 from ngsolve.krylovspace import GMRes
 import time as time
+import petsc4py.PETSc as psc
 
 def BulkModulus(G, nu):
     return 2*G*(1 + nu) / (3 - 6*nu)
@@ -56,6 +58,43 @@ def YoungsModulus(G, nu):
 
 def LameParameter(G, nu):
     return 2*G*nu / (1 - 2*nu)
+
+def default_stiffness_scaling(comp_err, comp_ezz, comp_eth, comp_erz,
+                               lame_star, gf_err, gf_ezz, gf_eth, gf_erz,
+                               gf_vel_mag, gf_vr, gf_vz,
+                               gf_p, gf_p_old, dp_dt, **kwargs):
+    scale_rr = 1 + comp_err
+    scale_zz = 1 + comp_ezz
+    scale_th = 1 + comp_eth
+    scale_rz = 1 + comp_erz
+
+    C11 = scale_rr * (lame_star + 2)
+    C22 = scale_zz * (lame_star + 2)
+    C33 = scale_th * (lame_star + 2)
+    C44 = scale_rz
+    C12 = ((scale_rr + scale_zz) / 2) * lame_star
+    C13 = ((scale_rr + scale_th) / 2) * lame_star
+    C23 = ((scale_zz + scale_th) / 2) * lame_star
+
+    cauchy_values = (C11, C12, C13, 0,
+                     C12, C22, C23, 0,
+                     C13, C23, C33, 0,
+                     0,   0,   0,   C44)
+    return CoefficientFunction(cauchy_values, dims=(4, 4))
+
+
+def default_permeability_scaling(comp_err, comp_ezz, comp_eth, comp_erz,
+                                  lame_star, gf_err, gf_ezz, gf_eth, gf_erz,
+                                  gf_vel_mag, gf_vr, gf_vz,
+                                  gf_p, gf_p_old, dp_dt, k_ref, **kwargs):
+    scale = 2
+    scale_rr = exp(-scale * comp_err)
+    scale_zz = exp(-scale * comp_ezz)
+
+    k_values = (scale_rr, 0,
+                0, scale_zz)
+    return CoefficientFunction(k_values, dims=(2, 2))
+
 
 
 
@@ -78,9 +117,11 @@ def ConfinedCompression(G, nu, viscosity, alpha, phi, k, chi, rho, g, dt, dt_max
         
     def AxialGrad(v):
         gv = Grad(v)
+
         return CF((gv[0,0], gv[0,1], 0,
                     gv[1,0], gv[1,1], 0,
                     0,       0,       v[0]/r), dims=(3,3))
+
         
     start_time = time.time()
     L = H
@@ -88,18 +129,6 @@ def ConfinedCompression(G, nu, viscosity, alpha, phi, k, chi, rho, g, dt, dt_max
 
     lame_star = 2*nu / (1 - 2*nu)  
 
-    C11, C12, C13, C14 = lame_star + 2, lame_star,     lame_star,     0
-    C21, C22, C23, C24 = lame_star,     lame_star + 2, lame_star,     0
-    C31, C32, C33, C34 = lame_star,     lame_star,     lame_star + 2, 0
-    C41, C42, C43, C44 = 0,             0,             0,             1
-    
-
-    cauchy_values = (C11, C12, C13, C14,
-                     C21, C22, C23, C24,
-                     C31, C32, C33, C34,
-                     C41, C42, C43, C44)
-    
-    Cauchy_tensor_star = CoefficientFunction(cauchy_values, dims=(4, 4)).Compile()
     twopi = 2*np.pi
     k_ref = k
 
@@ -111,12 +140,7 @@ def ConfinedCompression(G, nu, viscosity, alpha, phi, k, chi, rho, g, dt, dt_max
     dt_star = dt / tau 
     S_star = S * G
     
-    k11, k12 = k_ref, 0
-    k21, k22 = 0, k_ref
-    k_values = (k11/k_ref, k12/k_ref,
-                k21/k_ref, k22/k_ref)
-    
-    k_star = CoefficientFunction(k_values, dims=(2,2)).Compile()
+
 
     R_Star = R / H
     H_Star = 1.0
@@ -148,16 +172,91 @@ def ConfinedCompression(G, nu, viscosity, alpha, phi, k, chi, rho, g, dt, dt_max
 
     qbar = CoefficientFunction(0) 
     r = x
-   
+    W = H1(mesh, order=order-1)
+    gf_drawing = GridFunction(W)
+    gf2_drawing = GridFunction(W)
     if DrawResults == True:
         from ngsolve.webgui import Draw
         sceneu = Draw(gfu_star, mesh, deformation=True)
         scenep = Draw(G * gfp_star, mesh)
         scene_darcy = Draw(-(k/viscosity) * (G/L) * grad(gfp_star), mesh, name="darcy_flux [m/s]")
         scene_vel = Draw((L/tau) * (gfu_star - u_old_star) / dt_star, mesh, name="solid_velocity [m/s]")
+        scene = Draw(gf_drawing, mesh)
+        scene2 = Draw(gf2_drawing, mesh)
+
+
+    def update_material(gfu_star, u_old_star, gfp_star, p_old_star, dt_star, W, k_ref, lame_star, L, tau):
+        """
+        Compute all strain-dependent material properties from current field solutions.
+                
+        Inputs:
+            gfu_star        : current displacement GridFunction
+            u_old_star      : previous displacement GridFunction  
+            gfp_star        : current pressure GridFunction
+            p_old_star      : previous pressure GridFunction
+            dt_star         : current dimensionless time step
+            W               : scalar H1 space for projections
+            k_ref           : reference permeability
+            lame_star       : dimensionless Lame parameter
+            L, tau          : characteristic length and time scales
+            stiffness_scaling_fn  : optional custom stiffness function
+            permeability_scaling_fn : optional custom permeability function
+
+        Outputs:
+            Cauchy_tensor_star : 4x4 CoefficientFunction
+            k_star             : 2x2 CoefficientFunction
+        """
+        # strain
+        strain = eps_ax(gfu_star)
+        gf_err = GridFunction(W)
+        gf_ezz = GridFunction(W)
+        gf_eth = GridFunction(W)
+        gf_erz = GridFunction(W)
+
+        gf_err.Set(strain[0])
+        gf_ezz.Set(strain[1])
+        gf_eth.Set(strain[2])
+        gf_erz.Set(strain[3])
+
+        comp_err = IfPos(-gf_err - 1e-7, -gf_err, 0.0)
+        comp_ezz = IfPos(-gf_ezz - 1e-7, -gf_ezz, 0.0)
+        comp_eth = IfPos(-gf_eth - 1e-7, -gf_eth, 0.0)
+        comp_erz = IfPos(-gf_erz - 1e-7, -gf_erz, 0.0)
+
+            # --- Velocity ---
+        vel = (L / tau) * (gfu_star - u_old_star) / dt_star
+        gf_vr, gf_vz = GridFunction(W), GridFunction(W)
+        gf_vr.Set(vel[0])
+        gf_vz.Set(vel[1])
+        gf_vel_mag = GridFunction(W)
+        gf_vel_mag.Set(sqrt(gf_vr**2 + gf_vz**2))
+
+        # --- Pressure rate ---
+        gf_p     = gfp_star
+        gf_p_old = p_old_star
+        dp_dt    = (gf_p - gf_p_old) / dt_star
+
+        # --- Bundle everything for the scaling functions ---
+        fields = dict(
+            comp_err=comp_err, comp_ezz=comp_ezz, comp_eth=comp_eth, comp_erz=comp_erz,
+            lame_star=lame_star,
+            gf_err=gf_err, gf_ezz=gf_ezz, gf_eth=gf_eth, gf_erz=gf_erz,
+            gf_vel_mag=gf_vel_mag, gf_vr=gf_vr, gf_vz=gf_vz,
+            gf_p=gf_p, gf_p_old=gf_p_old, dp_dt=dp_dt,
+            k_ref=k_ref,
+        )
+
+        Cauchy_tensor_star = default_stiffness_scaling(**fields)
+        k_star             = default_permeability_scaling(**fields)
+
+        return Cauchy_tensor_star, k_star
+        
+    Cauchy_tensor_star, k_star = update_material(gfu_star, u_old_star, gfp_star, p_old_star, dt_star, W, k_ref, lame_star, L, tau)
+
 
     a_K = BilinearForm(V)
     a_K += InnerProduct(Cauchy_tensor_star * eps_ax(u), eps_ax(v)) * twopi * r * dx
+    #pre_a_K = Preconditioner(a_K, "direct")
     a_K.Assemble()
     pre_a_K = a_K.mat.Inverse(freedofs = V.FreeDofs(), inverse="sparsecholesky")
 
@@ -194,6 +293,7 @@ def ConfinedCompression(G, nu, viscosity, alpha, phi, k, chi, rho, g, dt, dt_max
     t_end_star = t_end / tau
     
     u_max_star = u_max / L
+
     t_ramp = compression_time 
     t_ramp_star = t_ramp / tau
 
@@ -207,7 +307,7 @@ def ConfinedCompression(G, nu, viscosity, alpha, phi, k, chi, rho, g, dt, dt_max
 
     F = BlockVector([
         b_f.vec, 
-        (1/dt_star) * a_Q.mat.T * u_old_star.vec + 
+        (alpha/dt_star) * a_Q.mat.T * u_old_star.vec + 
                     (S_star/dt_star) * a_S.mat * p_old_star.vec + 
                     b_q.vec])
 
@@ -220,75 +320,96 @@ def ConfinedCompression(G, nu, viscosity, alpha, phi, k, chi, rho, g, dt, dt_max
     v_test.Set(CF((0, 1)), definedon=mesh.Boundaries("bottom"))
 
     while t < t_end_star:
+        
         t += dt_star
-
+        max_iter = 10
+         
         uy_star = min(t / t_ramp_star, 1.0) * u_max_star
         disp_cf_star = CF((0, -uy_star))
         gfu_star.Set(disp_cf_star, definedon=mesh.Boundaries("top"))
+        tol_picard = 1e-6  
+        for picard_iter in range(max_iter):
+
+            gfu_star.vec.data = sol[0]
+            gfp_star.vec.data = sol[1]
+            Cauchy_tensor_star, k_star = update_material(gfu_star, u_old_star, gfp_star, p_old_star, dt_star, W, k_ref, lame_star, L, tau)
+            
+            a_K = BilinearForm(V)
+            a_K += InnerProduct(Cauchy_tensor_star * eps_ax(u), eps_ax(v)) * twopi * r * dx
+            a_K.Assemble()
+            pre_a_K = a_K.mat.Inverse(freedofs=V.FreeDofs(), inverse="sparsecholesky")
+
+            a_H = BilinearForm(Q)
+            a_H += (k_star * grad(p) * grad(q)) * twopi * r * dx
+            a_H.Assemble()
+
+            A = BlockMatrix([
+            [a_K.mat,        -alpha * a_Q.mat],
+            [(alpha/dt_star) * a_Q.mat.T,   a_H.mat + S_star/dt_star * a_S.mat]
+            ])
+
+            F = BlockVector([
+            b_f.vec, 
+            (alpha/dt_star) * a_Q.mat.T * u_old_star.vec + 
+                (S_star/dt_star) * a_S.mat * p_old_star.vec + 
+                b_q.vec])
+            
+            a_Schur = BilinearForm(Q)
+            a_Schur += (k_star * grad(p) * grad(q)) * twopi * r * dx          # H block
+            a_Schur += ((S_star)/dt_star) * p * q * twopi * r * dx  # augmented M
+            a_Schur.Assemble()
+            pre_Schur = a_Schur.mat.Inverse(freedofs=Q.FreeDofs(), inverse="sparsecholesky")
+
+            pre_C = BlockMatrix([
+                [dt_star * pre_a_K, None],
+                [None,   dt_star * pre_Schur]
+            ])
 
 
-        A = BlockMatrix([
-        [a_K.mat,        - a_Q.mat],
-        [(1/dt_star) * a_Q.mat.T,   a_H.mat + S_star/dt_star * a_S.mat]
-        ])
+            rhs_resid.data = F - A * sol
 
-        F[0].data = b_f.vec
-        F[1].data = ((1/dt_star) * a_Q.mat.T * u_old_star.vec + 
-                    (S_star/dt_star) * a_S.mat * p_old_star.vec + 
-                    b_q.vec)
+            fluid_force_star = Integrate(alpha * gfp_star * twopi * r, mesh, definedon=mesh.Boundaries("bottom"))
+
+            fluid_force_phys = fluid_force_star * (G * L**2)
+
+            
+            
+            rhs_resid[0].data[~V.FreeDofs()] = 0.0
+            rhs_resid[1].data[~Q.FreeDofs()] = 0.0
+
+            correction[:] = 0.0
+
         
-        a_Schur = BilinearForm(Q)
-        a_Schur += (k_star * grad(p) * grad(q)) * twopi * r * dx          # H block
-        a_Schur += ((S_star)/dt_star) * p * q * twopi * r * dx  # augmented M
-        a_Schur.Assemble()
-        pre_Schur = a_Schur.mat.Inverse(freedofs=Q.FreeDofs(), inverse="sparsecholesky")
+            GMRes(A=A, b=rhs_resid, pre=pre_C, x=correction, tol=tol, printrates="\r", maxsteps=maxsteps, restart=restart)
+            correction_norm = sqrt(InnerProduct(correction, correction))
+            sol.data += correction
+            sigma_star = Stress_ax_Anisotropic(gfu_star)  
+            solid_force_star = Integrate(InnerProduct(sigma_star, AxialGrad(v_test)) * twopi * r, mesh)
+            solid_force_phys = solid_force_star * (G * L**2)
 
-        pre_C = BlockMatrix([
-            [dt_star * pre_a_K, None],
-            [None,   dt_star * pre_Schur]
-        ])
+            print(f"  Picard iter {picard_iter+1}, correction norm = {correction_norm:.2e}")
+            #print(f"Solid: {solid_force_phys:.6f}, Fluid: {fluid_force_phys:.6f}, Total: {solid_force_phys + fluid_force_phys:.6f}, \
+            #    Time: {t*tau:.4f} s / {t_end:.4f} s, dt: {dt_star * tau:.6f} s")
+            if correction_norm < tol_picard:
+                break
 
-        sol[0].data = gfu_star.vec
-        sol[1].data = gfp_star.vec
-
-        rhs_resid.data = F - A * sol
-
-        fluid_force_star = Integrate(alpha * gfp_star * twopi * r, mesh, definedon=mesh.Boundaries("bottom"))
-
-        fluid_force_phys = fluid_force_star * (G * L**2)
 
         F_fluid.append(fluid_force_phys)
-        
-        rhs_resid[0].data[~V.FreeDofs()] = 0.0
-        rhs_resid[1].data[~Q.FreeDofs()] = 0.0
-
-        correction[:] = 0.0
-
-    
-        GMRes(A=A, b=rhs_resid, pre=pre_C, x=correction, tol=tol, printrates=False, maxsteps=maxsteps, restart=restart)
-        sol.data += correction
-        sigma_star = Stress_ax_Anisotropic(gfu_star)  
-        solid_force_star = Integrate(InnerProduct(sigma_star, AxialGrad(v_test)) * twopi * r, mesh)
-        solid_force_phys = solid_force_star * (G * L**2)
         F_solid.append(solid_force_phys)
-
-
-        elapsed = time.time() - start_time
-        #print(f" Total Force: {solid_force_phys + fluid_force_phys:.6f}, "
-        #    f"Simulation time: {t*tau:.4f} s / {t_end:.4f} s, "
-        #    f"dt: {dt_star * tau:.6f} s, "
-        #    f"Elapsed time: {elapsed:.2f} s")
+        gf_drawing.Set(Cauchy_tensor_star[1,1])
+        gf2_drawing.Set(k_star[1,1])
         if DrawResults == True: 
+
             sceneu.Redraw()
             scenep.Redraw()
             scene_darcy.Redraw()
             scene_vel.Redraw()
-
+            scene.Redraw()
+            scene2.Redraw()
         u_old_star.vec.data = gfu_star.vec
         p_old_star.vec.data = gfp_star.vec
 
         time_vals_nondim.append(t)
-
 
         dt_star = min(dt_star * growth_factor, dt_star_max)
 
@@ -328,22 +449,16 @@ def Consolidation(G, nu, viscosity, alpha, n, k, chi, rho, g, dt, dt_max, dt_gro
                     gv[1,0], gv[1,1], 0,
                     0,       0,       v[0]/r), dims=(3,3))
 
+
+    def velocity(gfu_star, u_old_star, dt_star):
+        vel = (L/tau) * (gfu_star - u_old_star) / dt_star
+        return vel
+    
     L = H
     growth_factor = dt_growth
 
     lame_star = LameParameter(G, nu) / G 
 
-    C11, C12, C13, C14 = lame_star + 2, lame_star,     lame_star,     0
-    C21, C22, C23, C24 = lame_star,     lame_star + 2, lame_star,     0
-    C31, C32, C33, C34 = lame_star,     lame_star,     lame_star + 2, 0
-    C41, C42, C43, C44 = 0,             0,             0,             1
-
-    cauchy_values = (C11, C12, C13, C14,
-                     C21, C22, C23, C24,
-                     C31, C32, C33, C34,
-                     C41, C42, C43, C44)
-    
-    Cauchy_tensor_star = CoefficientFunction(cauchy_values, dims=(4, 4)).Compile()
 
     twopi = 2*np.pi
     k_ref = k
@@ -394,14 +509,60 @@ def Consolidation(G, nu, viscosity, alpha, n, k, chi, rho, g, dt, dt_max, dt_gro
 
     qbar = CoefficientFunction(0) 
     r = x
-   
+
     if DrawResults == True:
         from ngsolve.webgui import Draw
-        sceneu = Draw(gfu_star, mesh, deformation=True)
-        scenep = Draw(G * gfp_star, mesh)
+        sceneu = Draw(gfu_star, mesh, deformation=gfu_star*1000)
+        scenep = Draw(G * gfp_star, mesh, max=1000)
         scene_darcy = Draw(-(k/viscosity) * (G/L) * grad(gfp_star), mesh, name="darcy_flux [m/s]")
         scene_vel = Draw((L/tau) * (gfu_star - u_old_star) / dt_star, mesh, name="solid_velocity [m/s]")
+    from ngsolve.webgui import Draw
+    # Strain components
+    W = H1(mesh, order=order-1)
+    gf_C22 = GridFunction(W)
+    scene_C22 = Draw(gf_C22, mesh, name="Effective G (C22)")
+    
+    def update_strain_scaling(gfu_star, W):
+        strain = eps_ax(gfu_star)
 
+        gf_err = GridFunction(W)
+        gf_ezz = GridFunction(W)
+        gf_eth = GridFunction(W)
+        gf_erz = GridFunction(W)
+
+        gf_err.Set(strain[0])
+        gf_ezz.Set(strain[1])
+        gf_eth.Set(strain[2])
+        gf_erz.Set(strain[3])
+
+        comp_err = IfPos(-gf_err - 1e-7, -gf_err, 0.0)
+        comp_ezz = IfPos(-gf_ezz - 1e-7, -gf_ezz, 0.0)
+        comp_eth = IfPos(-gf_eth - 1e-7, -gf_eth, 0.0)
+        comp_erz = IfPos(-gf_erz - 1e-7, -gf_erz, 0.0)
+
+        scale_rr = 10**(comp_err*100)
+        scale_zz = 10**(comp_ezz*100)
+        scale_th = 10**(comp_eth*100)
+        scale_rz = 10**(comp_erz*100)
+
+        C11 = scale_rr * (lame_star + 2)
+        C22 = scale_zz * (lame_star + 2)
+        C33 = scale_th * (lame_star + 2)
+        C44 = scale_rz
+
+        C12 = ((scale_rr + scale_zz) / 2) * lame_star
+        C13 = ((scale_rr + scale_th) / 2) * lame_star
+        C23 = ((scale_zz + scale_th) / 2) * lame_star
+
+        cauchy_values = (C11, C12, C13, 0,
+                        C12, C22, C23, 0,
+                        C13, C23, C33, 0,
+                        0,   0,   0,   C44)
+        
+
+        return CoefficientFunction(cauchy_values, dims=(4, 4))
+    
+    Cauchy_tensor_star = update_strain_scaling(gfu_star, W)
     a_K = BilinearForm(V)
     a_K += InnerProduct(Cauchy_tensor_star * eps_ax(u), eps_ax(v)) * twopi * r * dx
     a_K.Assemble()
@@ -462,44 +623,71 @@ def Consolidation(G, nu, viscosity, alpha, n, k, chi, rho, g, dt, dt_max, dt_gro
     all_p_values, displacement_max = [], []
     
     while t < t_end_star:
+        t += dt_star
+        max_iter = 5
+        tol_picard = 1e-6
 
-        A = BlockMatrix([
-        [a_K.mat,        -alpha * a_Q.mat],
-        [(alpha/dt_star) * a_Q.mat.T,   a_H.mat + S_star/dt_star * a_S.mat]
-        ])
+        for picard_iter in range(max_iter):
+            Cauchy_tensor_star = update_strain_scaling(gfu_star, W)
 
-        F = BlockVector([
-        b_f.vec, 
-        (alpha/dt_star) * a_Q.mat.T * u_old_star.vec + 
-            (S_star/dt_star) * a_S.mat * p_old_star.vec + 
-            b_q.vec])
+            a_K = BilinearForm(V)
+            a_K += InnerProduct(Cauchy_tensor_star * eps_ax(u), eps_ax(v)) * twopi * r * dx
+            a_K.Assemble()
+            pre_a_K = a_K.mat.Inverse(freedofs=V.FreeDofs(), inverse="sparsecholesky")
 
 
-        pre_C = BlockMatrix([
-            [dt_star * pre_a_K, None],
-            [None,   dt_star * pre_a_P]
-        ])
+            A = BlockMatrix([
+            [a_K.mat,        -alpha * a_Q.mat],
+            [(alpha/dt_star) * a_Q.mat.T,   a_H.mat + S_star/dt_star * a_S.mat]
+            ])
+
+            F = BlockVector([
+            b_f.vec, 
+            (alpha/dt_star) * a_Q.mat.T * u_old_star.vec + 
+                (S_star/dt_star) * a_S.mat * p_old_star.vec + 
+                b_q.vec])
+
+
+            pre_C = BlockMatrix([
+                [dt_star * pre_a_K, None],
+                [None,   dt_star * pre_a_P]
+            ])
+            
+            sol[0].data = gfu_star.vec
+            sol[1].data = gfp_star.vec
+
+            rhs_resid.data = F - A * sol
+            
+            rhs_resid[0].data[~V.FreeDofs()] = 0.0
+            rhs_resid[1].data[~Q.FreeDofs()] = 0.0
+
+            correction[:] = 0.0
+            GMRes(A=A, b=rhs_resid, pre=pre_C, x=correction, tol=tol, printrates=False, maxsteps=500, restart=150)
+            correction_norm = sqrt(InnerProduct(correction, correction))
+            sol.data += correction
+            print(f"  Picard iter {picard_iter+1}, correction norm = {correction_norm:.2e}")
+            #print(f"Solid: {solid_force_phys:.6f}, Fluid: {fluid_force_phys:.6f}, Total: {solid_force_phys + fluid_force_phys:.6f}, \
+            #    Time: {t*tau:.4f} s / {t_end:.4f} s, dt: {dt_star * tau:.6f} s")
+            if correction_norm < tol_picard:
+                break
         
-        sol[0].data = gfu_star.vec
-        sol[1].data = gfp_star.vec
-
-        rhs_resid.data = F - A * sol
-        
-        rhs_resid[0].data[~V.FreeDofs()] = 0.0
-        rhs_resid[1].data[~Q.FreeDofs()] = 0.0
-
-        correction[:] = 0.0
-        GMRes(A=A, b=rhs_resid, pre=pre_C, x=correction, tol=tol, printrates=False, maxsteps=500, restart=150)
-        sol.data += correction
-
-        #print(f"Solid: {solid_force_phys:.6f}, Fluid: {fluid_force_phys:.6f}, Total: {solid_force_phys + fluid_force_phys:.6f}, \
-        #    Time: {t*tau:.4f} s / {t_end:.4f} s, dt: {dt_star * tau:.6f} s")
         if DrawResults == True: 
             sceneu.Redraw()
             scenep.Redraw()
             scene_darcy.Redraw()
             scene_vel.Redraw()
- 
+
+        strain = eps_ax(gfu_star)
+        gf_ezz = GridFunction(W)
+        gf_ezz.Set(strain[1])
+        comp_ezz = IfPos(-gf_ezz - 1e-7, -gf_ezz, 0.0)
+
+        scale_zz = 10**(comp_ezz*100)
+
+
+        gf_C22.Set(scale_zz)  # multiply by G to recover dimensional value
+        scene_C22.Redraw()
+        
         u_old_star.vec.data = gfu_star.vec
         p_old_star.vec.data = gfp_star.vec
 
@@ -522,7 +710,6 @@ def Consolidation(G, nu, viscosity, alpha, n, k, chi, rho, g, dt, dt_max, dt_gro
         time_vals_nondim.append(t)
 
         dt_star = min(dt_star * growth_factor, dt_star_max)
-        t += dt_star
 
     
     time_vals = np.array(time_vals_nondim)*tau
