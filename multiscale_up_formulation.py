@@ -96,8 +96,6 @@ def default_permeability_scaling(comp_err, comp_ezz, comp_eth, comp_erz,
     return CoefficientFunction(k_values, dims=(2, 2))
 
 
-
-
 def ConfinedCompression(G, nu, viscosity, alpha, phi, k, chi, rho, g, dt, dt_max, dt_growth, R, H, u_max , compression_time, t_end, nx, ny, grading, order, tol, maxsteps, restart, Confined=True, DrawResults=False):
     
     def div_ax(u):
@@ -307,7 +305,7 @@ def ConfinedCompression(G, nu, viscosity, alpha, phi, k, chi, rho, g, dt, dt_max
 
     F = BlockVector([
         b_f.vec, 
-        (alpha/dt_star) * a_Q.mat.T * u_old_star.vec + 
+        (1/dt_star) * a_Q.mat.T * u_old_star.vec + 
                     (S_star/dt_star) * a_S.mat * p_old_star.vec + 
                     b_q.vec])
 
@@ -318,6 +316,7 @@ def ConfinedCompression(G, nu, viscosity, alpha, phi, k, chi, rho, g, dt, dt_max
 
     v_test = GridFunction(V)
     v_test.Set(CF((0, 1)), definedon=mesh.Boundaries("bottom"))
+ 
 
     while t < t_end_star:
         
@@ -339,40 +338,37 @@ def ConfinedCompression(G, nu, viscosity, alpha, phi, k, chi, rho, g, dt, dt_max
             a_K.Assemble()
             pre_a_K = a_K.mat.Inverse(freedofs=V.FreeDofs(), inverse="sparsecholesky")
 
-            a_H = BilinearForm(Q)
-            a_H += (k_star * grad(p) * grad(q)) * twopi * r * dx
-            a_H.Assemble()
-
-            A = BlockMatrix([
-            [a_K.mat,        -alpha * a_Q.mat],
-            [(alpha/dt_star) * a_Q.mat.T,   a_H.mat + S_star/dt_star * a_S.mat]
-            ])
-
-            F = BlockVector([
-            b_f.vec, 
-            (alpha/dt_star) * a_Q.mat.T * u_old_star.vec + 
-                (S_star/dt_star) * a_S.mat * p_old_star.vec + 
-                b_q.vec])
-            
             a_Schur = BilinearForm(Q)
             a_Schur += (k_star * grad(p) * grad(q)) * twopi * r * dx          # H block
             a_Schur += ((S_star)/dt_star) * p * q * twopi * r * dx  # augmented M
             a_Schur.Assemble()
             pre_Schur = a_Schur.mat.Inverse(freedofs=Q.FreeDofs(), inverse="sparsecholesky")
 
+            a_H = BilinearForm(Q)
+            a_H += (k_star * grad(p) * grad(q)) * twopi * r * dx
+            a_H.Assemble()
+
+            A = BlockMatrix([
+            [a_K.mat,        -alpha * a_Q.mat],
+            [(1/dt_star) * a_Q.mat.T,   a_H.mat + S_star/dt_star * a_S.mat]
+            ])
+
+            F = BlockVector([
+            b_f.vec,
+            (1/dt_star) * a_Q.mat.T * u_old_star.vec + 
+                (S_star/dt_star) * a_S.mat * p_old_star.vec + 
+                b_q.vec])
+            
             pre_C = BlockMatrix([
                 [dt_star * pre_a_K, None],
                 [None,   dt_star * pre_Schur]
             ])
-
 
             rhs_resid.data = F - A * sol
 
             fluid_force_star = Integrate(alpha * gfp_star * twopi * r, mesh, definedon=mesh.Boundaries("bottom"))
 
             fluid_force_phys = fluid_force_star * (G * L**2)
-
-            
             
             rhs_resid[0].data[~V.FreeDofs()] = 0.0
             rhs_resid[1].data[~Q.FreeDofs()] = 0.0

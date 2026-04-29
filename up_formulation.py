@@ -1,7 +1,8 @@
 from ngsolve import *
 from netgen.meshing import Mesh as NetMesh, MeshPoint, Element2D, Element1D, FaceDescriptor
 import netgen.meshing as meshing
-
+import scipy
+import numpy as np
 def MakeStructuredMesh(nx, ny, Lx, Ly, grading):
     m = NetMesh()
     m.dim = 2
@@ -123,9 +124,10 @@ def ConfinedCompression(G, nu, viscosity, alpha, phi, k, chi, rho, g, dt, dt_max
     mesh = MakeStructuredMesh(nx, ny, R_Star, H_Star, grading)
     if Confined == True:
         V = VectorH1(mesh, order=order, dirichlet="top|bottom", dirichletx="sides")
+        Q = H1(mesh,order=order-1, dirichlet="top")
     if Confined == False:
         V = VectorH1(mesh, order=order, dirichlet="top|bottom")
-    Q = H1(mesh,order=order-1, dirichlet="top")
+        Q = H1(mesh,order=order-1, dirichlet="top|sides")
     
     (u,v) = V.TnT()
     (p,q) = Q.TnT()
@@ -219,9 +221,18 @@ def ConfinedCompression(G, nu, viscosity, alpha, phi, k, chi, rho, g, dt, dt_max
     v_test = GridFunction(V)
     v_test.Set(CF((0, 1)), definedon=mesh.Boundaries("bottom"))
 
+
+    a_Schur = BilinearForm(Q)
+    a_Schur += (k_star * grad(p) * grad(q)) * twopi * r * dx
+    a_Schur += (S_star / dt_star) * p * q * twopi * r * dx
+    a_Schur += alpha**2 * p * q * twopi * r * dx
+    a_Schur.Assemble()
+    pre_Schur = a_Schur.mat.Inverse(freedofs=Q.FreeDofs(), inverse="sparsecholesky")
+        
+ 
+    
     while t < t_end_star:
         t += dt_star
-
         uy_star = min(t / t_ramp_star, 1.0) * u_max_star
         disp_cf_star = CF((0, -uy_star))
         gfu_star.Set(disp_cf_star, definedon=mesh.Boundaries("top"))
@@ -236,16 +247,25 @@ def ConfinedCompression(G, nu, viscosity, alpha, phi, k, chi, rho, g, dt, dt_max
         F[1].data = ((1/dt_star) * a_Q.mat.T * u_old_star.vec + 
                     (S_star/dt_star) * a_S.mat * p_old_star.vec + 
                     b_q.vec)
-        
+        """
         a_Schur = BilinearForm(Q)
         a_Schur += (k_star * grad(p) * grad(q)) * twopi * r * dx          # H block
-        a_Schur += ((S_star)/dt_star) * p * q * twopi * r * dx  # augmented M
+        a_Schur += ((S_star)/dt_star) * p * q * twopi * r * dx  # augmented S
+        a_Schur += alpha**2 * p * q * twopi * r * dx
         a_Schur.Assemble()
         pre_Schur = a_Schur.mat.Inverse(freedofs=Q.FreeDofs(), inverse="sparsecholesky")
+   
 
         pre_C = BlockMatrix([
             [dt_star * pre_a_K, None],
             [None,   dt_star * pre_Schur]
+        ])
+        """
+
+
+        pre_C = BlockMatrix([
+        [dt_star * pre_a_K, None],
+        [None,   dt_star * pre_Schur]
         ])
 
         sol[0].data = gfu_star.vec
@@ -265,7 +285,7 @@ def ConfinedCompression(G, nu, viscosity, alpha, phi, k, chi, rho, g, dt, dt_max
         correction[:] = 0.0
 
     
-        GMRes(A=A, b=rhs_resid, pre=pre_C, x=correction, tol=tol, printrates=False, maxsteps=maxsteps, restart=restart)
+        GMRes(A=A, b=rhs_resid, pre=pre_C, x=correction, tol=tol, printrates="\r", maxsteps=maxsteps, restart=restart)
         sol.data += correction
         sigma_star = Stress_ax_Anisotropic(gfu_star)  
         solid_force_star = Integrate(InnerProduct(sigma_star, AxialGrad(v_test)) * twopi * r, mesh)
