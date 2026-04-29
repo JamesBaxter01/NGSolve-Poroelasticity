@@ -20,8 +20,8 @@ H = 1e-3 # [m] Height of the cylindrical sample
 
 # Material Properties
 
-nu = 0.2 # Poisson's ratio
-G = 2e5
+nu = 0.49 # Poisson's ratio
+G = 2e3                  
 alpha = 0.9 # Biot coefficient
 k = 1e-18 # [m^2] Intrinsic Permeability
 phi = 0.8 # Porosity
@@ -53,7 +53,7 @@ restart = 200 # GMRes iterations before restart
 
 # Timing code
 t0 = time.time()
-time_vals, F_solid, F_fluid = up_formulation.ConfinedCompression(G, nu, viscosity, alpha, phi, k,
+time_vals, F_solid, F_fluid = multiscale_up_formulation.ConfinedCompression(G, nu, viscosity, alpha, phi, k,
      chi, rho, g, dt, dt_max, dt_growth, R, H, u_max , compression_time, t_end, nx,
      ny, grading, order, tol, maxsteps, restart, Confined, DrawResults)
 t1 = time.time()

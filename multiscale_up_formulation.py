@@ -87,7 +87,7 @@ def default_permeability_scaling(comp_err, comp_ezz, comp_eth, comp_erz,
                                   lame_star, gf_err, gf_ezz, gf_eth, gf_erz,
                                   gf_vel_mag, gf_vr, gf_vz,
                                   gf_p, gf_p_old, dp_dt, k_ref, **kwargs):
-    scale = 2
+    scale = 1
     scale_rr = exp(-scale * comp_err)
     scale_zz = exp(-scale * comp_ezz)
 
