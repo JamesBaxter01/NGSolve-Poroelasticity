@@ -48,18 +48,16 @@ compression_time = 92.2 # [s] Time duration for which the compression is applied
 # Mesh Parameters
 nx = 10 # Number of elements in X direction (radial)
 ny = 20 # Number of elements in Y direction (axial)
-order = 3 # Polynomial order for the finite element space
+order = 2 # Polynomial order for the finite element space
 grading = 0.95 # Mesh grading parameter, controls bias of elements near the surface
  
 # Solver settings
-tol = 1e-16 # GMRes solver tolerance
+tol = 1e-14 # GMRes solver tolerance
 maxsteps = 500 # GMRes iterations per timestep
-restart = 150 # GMRes iterations before restart 
+restart = 150 # GMRes iterations before restart
 
-print(1.8e-18 / 4.585e-19)
 
 perm_scaling_factor = 1.8e-18 / 4.585e-19
-
 C_scaling_factor = 9
 
 C = C_cauchy_6x6 * C_scaling_factor
@@ -91,3 +89,11 @@ time_vals, F_solid, F_fluid = upC.ConfinedCompression(
     restart,
     DrawResults=False
 )
+
+plt.plot(time_vals, F_solid, label="Solid Force")
+plt.plot(time_vals, F_fluid, label="Fluid Force")
+plt.plot(time_vals, np.array(F_solid) + np.array(F_fluid), label="Total Force")
+plt.xlabel("Time (s)") 
+plt.ylabel("Force (N)")
+plt.legend()
+plt.show()

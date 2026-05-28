@@ -45,7 +45,6 @@ from netgen.occ import *
 from ngsolve import *
 import numpy as np
 import time as time
-import matplotlib.pyplot as plt
 from ngsolve.krylovspace import GMRes
 import time as time
 
@@ -151,7 +150,7 @@ def default_permeability_scaling(comp_err, comp_ezz, comp_eth, comp_erz,
 
 
 def ConfinedCompression(C, viscosity, alpha, phi, k, chi, rho, g, dt, dt_max, dt_growth, R, H, u_max , compression_time, t_end, nx, ny, grading, order, tol, maxsteps, restart, Confined=True, DrawResults=False):
-    
+    start_time = time.time()
     def div_ax(u):
         return (grad(u)[0,0] + u[0]/r + grad(u)[1,1])
 
@@ -324,9 +323,9 @@ def ConfinedCompression(C, viscosity, alpha, phi, k, chi, rho, g, dt, dt_max, dt
 
     a_K = BilinearForm(V)
     a_K += InnerProduct(Cauchy_tensor_star * eps_ax(u), eps_ax(v)) * twopi * r * dx
-    #pre_a_K = Preconditioner(a_K, "direct")
+    pre_a_K = Preconditioner(a_K, "bddc")
     a_K.Assemble()
-    pre_a_K = a_K.mat.Inverse(freedofs = V.FreeDofs(), inverse="sparsecholesky")
+    #pre_a_K = a_K.mat.Inverse(freedofs = V.FreeDofs(), inverse="sparsecholesky")
 
     a_Q = BilinearForm(trialspace=Q, testspace=V)
     a_Q += alpha * p * div_ax(v) * twopi * r * dx
@@ -389,30 +388,41 @@ def ConfinedCompression(C, viscosity, alpha, phi, k, chi, rho, g, dt, dt_max, dt
  
 
     while t < t_end_star:
-        
+        #print(f"Time: {t*tau:.4f} s / {t_end:.4f} s, dt: {dt_star * tau:.6f} s", flush=True)
         t += dt_star
         max_iter = 20
-         
+        print(
+            f"wall={time.time()-start_time:.2f}s, "
+            f"model t={t*tau:.4f}/{t_end:.1f}, "
+            f"dt={dt_star*tau:.6f}",
+            flush=True,
+        )
         uy_star = min(t / t_ramp_star, 1.0) * u_max_star
         disp_cf_star = CF((0, -uy_star))
         gfu_star.Set(disp_cf_star, definedon=mesh.Boundaries("top"))
         tol_picard = 1e-6  
+
+        # once per timestep
+        a_K = BilinearForm(V)
+        a_K += InnerProduct(Cauchy_tensor_star * eps_ax(u), eps_ax(v)) * twopi * r * dx
+        pre_a_K = Preconditioner(a_K, "direct")
+        a_K.Assemble()
+
+        a_Schur = BilinearForm(Q)
+        a_Schur += (k_star * grad(p) * grad(q)) * twopi * r * dx          # H block
+        a_Schur += ((S_star)/dt_star) * p * q * twopi * r * dx  # augmented M
+        pre_Schur = Preconditioner(a_Schur, "direct")
+        a_Schur.Assemble()
+        
         for picard_iter in range(max_iter):
 
             gfu_star.vec.data = sol[0]
             gfp_star.vec.data = sol[1]
             Cauchy_tensor_star, k_star = update_material(gfu_star, u_old_star, gfp_star, p_old_star, dt_star, W, k_ref, k_axis_star, C_axis_star, L, tau)
-            
             a_K = BilinearForm(V)
             a_K += InnerProduct(Cauchy_tensor_star * eps_ax(u), eps_ax(v)) * twopi * r * dx
             a_K.Assemble()
-            pre_a_K = a_K.mat.Inverse(freedofs=V.FreeDofs(), inverse="sparsecholesky")
 
-            a_Schur = BilinearForm(Q)
-            a_Schur += (k_star * grad(p) * grad(q)) * twopi * r * dx          # H block
-            a_Schur += ((S_star)/dt_star) * p * q * twopi * r * dx  # augmented M
-            a_Schur.Assemble()
-            pre_Schur = a_Schur.mat.Inverse(freedofs=Q.FreeDofs(), inverse="sparsecholesky")
 
             a_H = BilinearForm(Q)
             a_H += (k_star * grad(p) * grad(q)) * twopi * r * dx
@@ -445,17 +455,15 @@ def ConfinedCompression(C, viscosity, alpha, phi, k, chi, rho, g, dt, dt_max, dt
 
             correction[:] = 0.0
 
-        
-            GMRes(A=A, b=rhs_resid, pre=pre_C, x=correction, tol=tol, printrates="\r", maxsteps=maxsteps, restart=restart)
+            GMRes(A=A, b=rhs_resid, pre=pre_C, x=correction, tol=tol, printrates=False, maxsteps=maxsteps, restart=restart)
+
             correction_norm = sqrt(InnerProduct(correction, correction))
             sol.data += correction
             sigma_star = Stress_ax_Anisotropic(gfu_star)  
             solid_force_star = Integrate(InnerProduct(sigma_star, AxialGrad(v_test)) * twopi * r, mesh)
             solid_force_phys = solid_force_star * (G_ref * L**2)
 
-            print(f"  Picard iter {picard_iter+1}, correction norm = {correction_norm:.2e}")
-            #print(f"Solid: {solid_force_phys:.6f}, Fluid: {fluid_force_phys:.6f}, Total: {solid_force_phys + fluid_force_phys:.6f}, \
-            #    Time: {t*tau:.4f} s / {t_end:.4f} s, dt: {dt_star * tau:.6f} s")
+
             if correction_norm < tol_picard:
                 break
 
@@ -634,7 +642,7 @@ def Consolidation(G, nu, viscosity, alpha, n, k, chi, rho, g, dt, dt_max, dt_gro
     a_K = BilinearForm(V)
     a_K += InnerProduct(Cauchy_tensor_star * eps_ax(u), eps_ax(v)) * twopi * r * dx
     a_K.Assemble()
-    pre_a_K = a_K.mat.Inverse(freedofs = V.FreeDofs(), inverse="sparsecholesky")
+    pre_a_K = a_K.mat.Inverse(freedofs = V.FreeDofs(), inverse="bddc")
 
     a_Q = BilinearForm(trialspace=Q, testspace=V)
     a_Q += p * div_ax(v) * twopi * r * dx
@@ -733,7 +741,7 @@ def Consolidation(G, nu, viscosity, alpha, n, k, chi, rho, g, dt, dt_max, dt_gro
             GMRes(A=A, b=rhs_resid, pre=pre_C, x=correction, tol=tol, printrates=False, maxsteps=500, restart=150)
             correction_norm = sqrt(InnerProduct(correction, correction))
             sol.data += correction
-            print(f"  Picard iter {picard_iter+1}, correction norm = {correction_norm:.2e}")
+            #print(f"  Picard iter {picard_iter+1}, correction norm = {correction_norm:.2e}")
             #print(f"Solid: {solid_force_phys:.6f}, Fluid: {fluid_force_phys:.6f}, Total: {solid_force_phys + fluid_force_phys:.6f}, \
             #    Time: {t*tau:.4f} s / {t_end:.4f} s, dt: {dt_star * tau:.6f} s")
             if correction_norm < tol_picard:
